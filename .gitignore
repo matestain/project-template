@@ -1,0 +1,31 @@
+# Client contacts — never commit to shared/public remotes
+docs/contacts.md
+
+# Environment and secrets
+.env
+.env.local
+.env.*
+*.secret
+
+# Editor
+.vscode/
+.idea/
+*.suo
+*.user
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Python (if scripts are included)
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# Node (if applicable)
+node_modules/
