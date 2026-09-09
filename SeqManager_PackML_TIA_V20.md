@@ -1,24 +1,24 @@
 # Sequence Manager PackML — TIA Portal V20
-**Arquitectura: FB_SeqRunner + FB_SeqMaster — Basado en OMAC PackML / ISA-88**
-Versión 2.0
+**Architecture: FB_SeqRunner + FB_SeqMaster — Based on OMAC PackML / ISA-88**
+Version 2.0
 
 ---
 
-## Tabla de contenidos
-1. [Arquitectura general](#1-arquitectura-general)
-2. [PackML — Referencia de estados y transiciones](#2-packml--referencia-de-estados-y-transiciones)
+## Table of contents
+1. [General architecture](#1-general-architecture)
+2. [PackML — State and transition reference](#2-packml--state-and-transition-reference)
 3. [UDTs](#3-udts)
-4. [DBs globales](#4-dbs-globales)
+4. [Global DBs](#4-global-dbs)
 5. [FB_SeqRunner](#5-fb_seqrunner)
 6. [FB_SeqMaster](#6-fb_seqmaster)
-7. [Cómo armarlo en TIA Portal](#7-cómo-armarlo-en-tia-portal)
-8. [Cómo usarlo — ejemplos](#8-cómo-usarlo--ejemplos)
-9. [Escalado y topologías](#9-escalado-y-topologías)
-10. [Notas y limitaciones](#10-notas-y-limitaciones)
+7. [How to set it up in TIA Portal](#7-how-to-set-it-up-in-tia-portal)
+8. [How to use it — examples](#8-how-to-use-it--examples)
+9. [Scaling and topologies](#9-scaling-and-topologies)
+10. [Notes and limitations](#10-notes-and-limitations)
 
 ---
 
-## 1. Arquitectura general
+## 1. General architecture
 
 ```
 OB1
@@ -32,96 +32,96 @@ OB1
  │    └── FB_SeqRunner [Chemical]   ──► DB_DEVICES.Valves[1..8]
  │
  └── FB_SeqRunner "Agitator"        ──► DB_DEVICES.Motors[1..4]
-     (standalone — sin Master)
+     (standalone — no Master)
 ```
 
-### Principios de diseño
+### Design principles
 
-- **PackML completo** — estados, transiciones y comandos según OMAC PackML v3.0 / ISA-88.
-- **UDT_SeqCtrl estructurado** — sub-structs `Config`, `Commands`, `Status`, `Faults`
-  alineados con la convención `UDT_xxxCtrl` del proyecto.
-- **FltSeverity por dispositivo** — el Runner decide Hold vs Abort según configuración,
-  sin cambios a los FBs de dispositivo existentes.
-- **Auto-resume opcional para HELD** — configurable por Runner en `Config.AutoResume`.
-- **Política de respuesta del Master** — configurable por sub-secuencia en `Config.SubPolicy`.
+- **Complete PackML** — states, transitions, and commands per OMAC PackML v3.0 / ISA-88.
+- **Structured UDT_SeqCtrl** — `Config`, `Commands`, `Status`, `Faults` sub-structs
+  aligned with the project's `UDT_xxxCtrl` convention.
+- **Per-device FltSeverity** — the Runner decides Hold vs Abort based on configuration,
+  with no changes to existing device FBs.
+- **Optional auto-resume for HELD** — configurable per Runner via `Config.AutoResume`.
+- **Master response policy** — configurable per sub-sequence via `Config.SubPolicy`.
 
 ---
 
-## 2. PackML — Referencia de estados y transiciones
+## 2. PackML — State and transition reference
 
-### Estados
+### States
 
-| Estado | Valor | Descripción |
+| State | Value | Description |
 |--------|-------|-------------|
-| IDLE | 0 | Listo, esperando CmdStart |
-| STARTING | 1 | Verificando condiciones previas |
-| EXECUTE | 2 | Corriendo pasos normalmente |
-| COMPLETING | 3 | Último paso OK, ejecutando cierre controlado |
-| COMPLETE | 4 | Secuencia terminada limpiamente |
-| HOLDING | 5 | Falla recuperable detectada, deteniendo controladamente |
-| HELD | 6 | Detenido en punto seguro, posición conservada |
-| RESUMING | 7 | Volviendo a EXECUTE desde HELD |
-| PAUSING | 8 | CmdPause recibido, deteniendo controladamente |
-| PAUSED | 9 | Detenido en punto seguro por pausa manual |
-| RESUMING_PAUSE | 10 | Volviendo a EXECUTE desde PAUSED (mismo estado, flag diferente) |
-| STOPPING | 11 | CmdStop recibido, cierre controlado |
-| STOPPED | 12 | Detenido limpiamente, puede reiniciarse |
-| ABORTING | 13 | Falla crítica, cierre de emergencia |
-| ABORTED | 14 | Requiere CmdReset + verificación manual |
+| IDLE | 0 | Ready, waiting for CmdStart |
+| STARTING | 1 | Checking preconditions |
+| EXECUTE | 2 | Running steps normally |
+| COMPLETING | 3 | Last step OK, running controlled shutdown |
+| COMPLETE | 4 | Sequence finished cleanly |
+| HOLDING | 5 | Recoverable fault detected, stopping in a controlled manner |
+| HELD | 6 | Stopped at a safe point, position preserved |
+| RESUMING | 7 | Returning to EXECUTE from HELD |
+| PAUSING | 8 | CmdPause received, stopping in a controlled manner |
+| PAUSED | 9 | Stopped at a safe point due to a manual pause |
+| RESUMING_PAUSE | 10 | Returning to EXECUTE from PAUSED (same state, different flag) |
+| STOPPING | 11 | CmdStop received, controlled shutdown |
+| STOPPED | 12 | Stopped cleanly, can be restarted |
+| ABORTING | 13 | Critical fault, emergency shutdown |
+| ABORTED | 14 | Requires CmdReset + manual verification |
 
-### Transiciones válidas
+### Valid transitions
 
 ```
 IDLE        →  STARTING    : CmdStart + IntlkReady + IntlkEstop
-STARTING    →  EXECUTE     : Todas las condiciones previas OK
-STARTING    →  ABORTING    : IntlkEstop = FALSE durante STARTING
+STARTING    →  EXECUTE     : All preconditions OK
+STARTING    →  ABORTING    : IntlkEstop = FALSE during STARTING
 
-EXECUTE     →  HOLDING     : FltAny en dispositivo con FltSeverity = 1 (Hold)
-EXECUTE     →  ABORTING    : FltAny en dispositivo con FltSeverity = 2 (Abort)
+EXECUTE     →  HOLDING     : FltAny on a device with FltSeverity = 1 (Hold)
+EXECUTE     →  ABORTING    : FltAny on a device with FltSeverity = 2 (Abort)
                              OR IntlkEstop = FALSE
 EXECUTE     →  PAUSING     : CmdPause
 EXECUTE     →  STOPPING    : CmdStop
-EXECUTE     →  COMPLETING  : Último paso completado
+EXECUTE     →  COMPLETING  : Last step completed
 
-HOLDING     →  HELD        : Todos los dispositivos en estado seguro
-HELD        →  RESUMING    : CmdResume (manual siempre)
-                             OR falla resuelta + Config.AutoResume = TRUE
-RESUMING    →  EXECUTE     : Condiciones de reanudación OK
+HOLDING     →  HELD        : All devices in a safe state
+HELD        →  RESUMING    : CmdResume (always manual)
+                             OR fault resolved + Config.AutoResume = TRUE
+RESUMING    →  EXECUTE     : Resume conditions OK
 
-PAUSING     →  PAUSED      : Todos los dispositivos en estado seguro
+PAUSING     →  PAUSED      : All devices in a safe state
 PAUSED      →  RESUMING    : CmdResume
-RESUMING    →  EXECUTE     : Condiciones OK
+RESUMING    →  EXECUTE     : Conditions OK
 
-COMPLETING  →  COMPLETE    : Cierre controlado finalizado
+COMPLETING  →  COMPLETE    : Controlled shutdown finished
 COMPLETE    →  IDLE        : CmdReset
 
-STOPPING    →  STOPPED     : Todos los dispositivos confirmados en base
+STOPPING    →  STOPPED     : All devices confirmed at base position
 STOPPED     →  IDLE        : CmdReset
 
-ABORTING    →  ABORTED     : Cierre de emergencia completado
+ABORTING    →  ABORTED     : Emergency shutdown completed
 ABORTED     →  IDLE        : CmdReset + IntlkEstop = TRUE
 
-ANY         →  ABORTING    : IntlkEstop = FALSE (excepto desde ABORTED)
+ANY         →  ABORTING    : IntlkEstop = FALSE (except from ABORTED)
 ```
 
-### Comandos PackML
+### PackML commands
 
-| Comando | Acción |
+| Command | Action |
 |---------|--------|
 | CmdStart | IDLE → STARTING |
 | CmdStop | EXECUTE/PAUSED/HELD → STOPPING |
 | CmdPause | EXECUTE → PAUSING |
 | CmdResume | HELD/PAUSED → RESUMING |
-| CmdAbort | Cualquier estado → ABORTING |
+| CmdAbort | Any state → ABORTING |
 | CmdReset | COMPLETE/STOPPED/ABORTED → IDLE |
-| CmdClear | Limpiar fallas sin cambiar estado |
+| CmdClear | Clear faults without changing state |
 
 ---
 
 ## 3. UDTs
 
 ### UDT_DeviceCtrl
-> Ampliado con `FltSeverity` para política Hold/Abort.
+> Extended with `FltSeverity` for Hold/Abort policy.
 
 ```scl
 TYPE "UDT_DeviceCtrl"
@@ -129,21 +129,21 @@ TYPE "UDT_DeviceCtrl"
         // ── Config ───────────────────────────────────────────────────────
         Config : STRUCT
             DevType     : USInt;    // 0=Valve 1=Motor 2=Analog 3=Servo
-            Enabled     : Bool;     // ENA — FALSE = ignorado por runner
+            Enabled     : Bool;     // ENA — FALSE = ignored by the runner
             FltSeverity : USInt;    // 0=Warning 1=Hold 2=Abort
         END_STRUCT;
 
-        // ── Commands (SeqRunner escribe, FB dispositivo lee) ─────────────
+        // ── Commands (SeqRunner writes, device FB reads) ─────────────
         Commands : STRUCT
             CmdAuto     : Bool;     // Valve: Open/Close — Motor: Start/Stop
-            CmdSetpoint : Real;     // Analog/Servo: setpoint objetivo
+            CmdSetpoint : Real;     // Analog/Servo: target setpoint
         END_STRUCT;
 
-        // ── Status (FB dispositivo escribe, SeqRunner lee) ───────────────
+        // ── Status (device FB writes, SeqRunner reads) ───────────────
         Status : STRUCT
-            StReady     : Bool;     // Listo para operar
-            StDone      : Bool;     // Llegó al estado objetivo
-            FltAny      : Bool;     // Falla activa
+            StReady     : Bool;     // Ready to operate
+            StDone      : Bool;     // Reached the target state
+            FltAny      : Bool;     // Active fault
         END_STRUCT;
     END_STRUCT;
 END_TYPE
@@ -152,13 +152,13 @@ END_TYPE
 ---
 
 ### UDT_SeqStep
-> Sin cambios respecto a v1.0 — polimórfico por StepType.
+> Unchanged from v1.0 — polymorphic by StepType.
 
 ```scl
 TYPE "UDT_SeqStep"
     STRUCT
         StepType    : USInt;                    // 0=Action 1=Wait 2=Condition 3=SubSeq
-        Timeout     : Real;                     // segundos. 0 = sin timeout
+        Timeout     : Real;                     // seconds. 0 = no timeout
         ActMask     : DWORD;
         ActTarget   : DWORD;
         ActSetpoint : ARRAY[1..32] OF Real;
@@ -175,21 +175,21 @@ END_TYPE
 ---
 
 ### UDT_SeqCtrl
-> Estructura principal del Runner. Sub-structs alineados con convención del proyecto.
+> The Runner's main structure. Sub-structs aligned with project convention.
 
 ```scl
 TYPE "UDT_SeqCtrl"
     STRUCT
 
-        // ── Config (se escribe una vez en startup o desde HMI) ────────────
+        // ── Config (written once at startup or from the HMI) ────────────
         Config : STRUCT
-            AutoResume      : Bool;     // TRUE = auto-resume de HELD si falla se limpia
-            AutoResumeTime  : Real;     // segundos máx para auto-resume (0 = sin límite)
-            StopTimeout     : Real;     // segundos para confirmar cierre en STOPPING/ABORTING
-            HoldTimeout     : Real;     // segundos máx en HOLDING antes de ir a ABORTING
+            AutoResume      : Bool;     // TRUE = auto-resume from HELD once the fault clears
+            AutoResumeTime  : Real;     // max seconds for auto-resume (0 = no limit)
+            StopTimeout     : Real;     // seconds to confirm shutdown in STOPPING/ABORTING
+            HoldTimeout     : Real;     // max seconds in HOLDING before going to ABORTING
         END_STRUCT;
 
-        // ── Commands (el caller o HMI escribe) ────────────────────────────
+        // ── Commands (written by the caller or HMI) ────────────────────────
         Commands : STRUCT
             CmdStart    : Bool;
             CmdStop     : Bool;
@@ -200,10 +200,10 @@ TYPE "UDT_SeqCtrl"
             CmdClear    : Bool;
         END_STRUCT;
 
-        // ── Status (el Runner escribe) ────────────────────────────────────
+        // ── Status (written by the Runner) ────────────────────────────────
         Status : STRUCT
-            State       : USInt;    // Estado PackML actual (ver constantes)
-            StStep      : Int;      // Paso actual
+            State       : USInt;    // Current PackML state (see constants)
+            StStep      : Int;      // Current step
             StIdle      : Bool;
             StStarting  : Bool;
             StExecute   : Bool;
@@ -218,21 +218,21 @@ TYPE "UDT_SeqCtrl"
             StStopped   : Bool;
             StAborting  : Bool;
             StAborted   : Bool;
-            StDone      : Bool;     // Secuencia completó todos los pasos limpiamente
+            StDone      : Bool;     // Sequence completed all steps cleanly
         END_STRUCT;
 
-        // ── Faults (el Runner escribe) ────────────────────────────────────
+        // ── Faults (written by the Runner) ────────────────────────────────
         Faults : STRUCT
             FaultCode   : USInt;    // 0=None 1=StepTimeout 2=EStop 3=DevFault 4=HoldTimeout
             FaultStep   : Int;
-            FaultDevice : Int;      // Índice del dispositivo que causó la falla
+            FaultDevice : Int;      // Index of the device that caused the fault
             FltAny      : Bool;
         END_STRUCT;
 
-        // ── Interlocks (el caller escribe cada ciclo) ─────────────────────
+        // ── Interlocks (written by the caller every cycle) ─────────────────────
         Interlocks : STRUCT
-            IntlkReady  : Bool;     // Permisos de proceso OK
-            IntlkEstop  : Bool;     // E-Stop OK (TRUE = sin estop)
+            IntlkReady  : Bool;     // Process permissives OK
+            IntlkEstop  : Bool;     // E-Stop OK (TRUE = no estop)
         END_STRUCT;
 
     END_STRUCT;
@@ -242,14 +242,14 @@ END_TYPE
 ---
 
 ### UDT_MasterSubConfig
-> Política de respuesta del Master ante fallas de sub-secuencias.
+> Master's response policy to sub-sequence faults.
 
 ```scl
 TYPE "UDT_MasterSubConfig"
     STRUCT
         OnFaultPolicy   : USInt;    // 0=AbortAll 1=AbortOnly 2=HoldAll 3=HoldOnly
-        OnTimeoutPolicy : USInt;    // misma lógica
-        IsMandatory     : Bool;     // FALSE = falla de este runner no afecta a los demás
+        OnTimeoutPolicy : USInt;    // same logic
+        IsMandatory     : Bool;     // FALSE = this runner's fault doesn't affect the others
     END_STRUCT;
 END_TYPE
 ```
@@ -257,7 +257,7 @@ END_TYPE
 ---
 
 ### UDT_MasterCtrl
-> Control del Master. Misma convención Config/Commands/Status/Faults.
+> Master control. Same Config/Commands/Status/Faults convention.
 
 ```scl
 TYPE "UDT_MasterCtrl"
@@ -289,7 +289,7 @@ TYPE "UDT_MasterCtrl"
 
         Faults : STRUCT
             FaultCode       : USInt;
-            FaultSubSeq     : USInt;    // Índice de sub-secuencia que causó la falla
+            FaultSubSeq     : USInt;    // Index of the sub-sequence that caused the fault
             FltAny          : Bool;
         END_STRUCT;
 
@@ -303,7 +303,7 @@ END_TYPE
 
 ---
 
-## 4. DBs globales
+## 4. Global DBs
 
 ```scl
 DATA_BLOCK "DB_DEVICES"
@@ -330,7 +330,7 @@ DATA_BLOCK "DB_SEQUENCES"
         Sub3Ctrl    : "UDT_SeqCtrl";
         Sub3Steps   : ARRAY[1..30] OF "UDT_SeqStep";
         nSub3Steps  : Int;
-        // Agregar según proyecto
+        // Add more as needed per project
     END_VAR
 END_DATA_BLOCK
 ```
@@ -339,13 +339,13 @@ END_DATA_BLOCK
 
 ## 5. FB_SeqRunner
 
-**Número sugerido:** FB211
+**Suggested number:** FB211
 
 ```scl
 FUNCTION_BLOCK "FB_SeqRunner"
 
 // ─────────────────────────────────────────────────────────────────────────────
-// INTERFAZ
+// INTERFACE
 // ─────────────────────────────────────────────────────────────────────────────
 VAR_INPUT
     nDevices    : Int;
@@ -359,8 +359,8 @@ VAR_IN_OUT
     ExtCond     : ARRAY[1..8]  OF Bool;
     SubDone     : ARRAY[1..8]  OF Bool;
     SubStart    : ARRAY[1..8]  OF Bool;
-    SubHeld     : ARRAY[1..8]  OF Bool;     // Feedback: sub-secuencia en HELD
-    SubPaused   : ARRAY[1..8]  OF Bool;     // Feedback: sub-secuencia en PAUSED
+    SubHeld     : ARRAY[1..8]  OF Bool;     // Feedback: sub-sequence in HELD
+    SubPaused   : ARRAY[1..8]  OF Bool;     // Feedback: sub-sequence in PAUSED
 END_VAR
 
 VAR
@@ -379,7 +379,7 @@ VAR
     _allSafe        : Bool;
     _faultDevice    : Int;
     _faultSeverity  : USInt;
-    _holdFromPause  : Bool;     // Distinguir RESUMING desde HELD vs PAUSED
+    _holdFromPause  : Bool;     // Distinguish RESUMING from HELD vs PAUSED
 END_VAR
 
 VAR_TEMP
@@ -388,7 +388,7 @@ VAR_TEMP
 END_VAR
 
 VAR CONSTANT
-    // Estados PackML
+    // PackML states
     ST_IDLE         : USInt := 0;
     ST_STARTING     : USInt := 1;
     ST_EXECUTE      : USInt := 2;
@@ -406,10 +406,10 @@ VAR CONSTANT
 END_VAR
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CUERPO
+// BODY
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ── CmdAbort y E-Stop: prioridad máxima, cualquier estado ────────────────────
+// ── CmdAbort and E-Stop: highest priority, any state ────────────────────
 IF (Ctrl.Commands.CmdAbort AND NOT _prevAbort)
    OR (NOT Ctrl.Interlocks.IntlkEstop AND Ctrl.Status.State <> ST_ABORTED) THEN
     Ctrl.Status.State       := ST_ABORTING;
@@ -417,7 +417,7 @@ IF (Ctrl.Commands.CmdAbort AND NOT _prevAbort)
     Ctrl.Faults.FltAny      := TRUE;
 END_IF;
 
-// ── Máquina de estados PackML ────────────────────────────────────────────────
+// ── PackML state machine ────────────────────────────────────────────────
 CASE Ctrl.Status.State OF
 
     // ── IDLE ─────────────────────────────────────────────────────────────────
@@ -442,8 +442,8 @@ CASE Ctrl.Status.State OF
 
     // ── STARTING ─────────────────────────────────────────────────────────────
     ST_STARTING:
-        // Verificar que todos los dispositivos habilitados no tienen fallas
-        // y están listos para operar
+        // Check that all enabled devices have no faults
+        // and are ready to operate
         _allSafe := TRUE;
         FOR _n := 1 TO nDevices DO
             IF Devices[_n].Config.Enabled THEN
@@ -466,7 +466,7 @@ CASE Ctrl.Status.State OF
 
     // ── EXECUTE ──────────────────────────────────────────────────────────────
     ST_EXECUTE:
-        // ── Detectar fallas en dispositivos ──────────────────────────────
+        // ── Detect device faults ──────────────────────────────────────
         _faultSeverity := USInt#0;
         _faultDevice   := 0;
         FOR _n := 1 TO nDevices DO
@@ -479,7 +479,7 @@ CASE Ctrl.Status.State OF
         END_FOR;
 
         IF _faultSeverity = USInt#1 THEN
-            // Hold — falla recuperable
+            // Hold — recoverable fault
             Ctrl.Status.State       := ST_HOLDING;
             Ctrl.Faults.FaultCode   := USInt#3;
             Ctrl.Faults.FaultDevice := _faultDevice;
@@ -487,7 +487,7 @@ CASE Ctrl.Status.State OF
             Ctrl.Faults.FltAny      := TRUE;
             _holdFromPause          := FALSE;
         ELSIF _faultSeverity = USInt#2 THEN
-            // Abort — falla crítica
+            // Abort — critical fault
             Ctrl.Status.State       := ST_ABORTING;
             Ctrl.Faults.FaultCode   := USInt#3;
             Ctrl.Faults.FaultDevice := _faultDevice;
@@ -495,7 +495,7 @@ CASE Ctrl.Status.State OF
             Ctrl.Faults.FltAny      := TRUE;
         END_IF;
 
-        // ── Ejecutar paso (solo si seguimos en EXECUTE) ───────────────────
+        // ── Execute step (only if we're still in EXECUTE) ───────────────────
         IF Ctrl.Status.State = ST_EXECUTE THEN
 
             CASE Steps[Ctrl.Status.StStep].StepType OF
@@ -543,7 +543,7 @@ CASE Ctrl.Status.State OF
                                     Steps[Ctrl.Status.StStep].WaitTime * 1000.0)));
                     _stepDone := _tWait.Q;
 
-                // StepType 2: Condition externa
+                // StepType 2: External condition
                 2:
                     IF Steps[Ctrl.Status.StStep].ExtCondIdx >= 1 AND
                        Steps[Ctrl.Status.StStep].ExtCondIdx <= 8 THEN
@@ -568,7 +568,7 @@ CASE Ctrl.Status.State OF
 
             END_CASE;
 
-            // ── Timeout del paso ──────────────────────────────────────────
+            // ── Step timeout ──────────────────────────────────────────
             _tStepTout(
                 IN := (Steps[Ctrl.Status.StStep].Timeout > 0.0) AND NOT _stepDone,
                 PT := DINT_TO_TIME(REAL_TO_DINT(
@@ -580,7 +580,7 @@ CASE Ctrl.Status.State OF
                 Ctrl.Faults.FltAny    := TRUE;
             END_IF;
 
-            // ── Avanzar paso ──────────────────────────────────────────────
+            // ── Advance step ──────────────────────────────────────────
             IF _stepDone AND Ctrl.Status.State = ST_EXECUTE THEN
                 IF Steps[Ctrl.Status.StStep].StepType = 3 THEN
                     SubStart[Steps[Ctrl.Status.StStep].SubSeqIdx] := FALSE;
@@ -596,7 +596,7 @@ CASE Ctrl.Status.State OF
 
         END_IF;
 
-        // Transiciones por comando
+        // Command-driven transitions
         IF Ctrl.Commands.CmdPause AND NOT _prevPause THEN
             Ctrl.Status.State  := ST_PAUSING;
             _holdFromPause     := TRUE;
@@ -607,7 +607,7 @@ CASE Ctrl.Status.State OF
 
     // ── COMPLETING ───────────────────────────────────────────────────────────
     ST_COMPLETING:
-        // Cierre controlado: comandar estado base a todos los dispositivos
+        // Controlled shutdown: command all devices to their base state
         FOR _n := 1 TO nDevices DO
             IF Devices[_n].Config.Enabled THEN
                 Devices[_n].Commands.CmdAuto     := FALSE;
@@ -615,7 +615,7 @@ CASE Ctrl.Status.State OF
             END_IF;
         END_FOR;
 
-        // Verificar que todos confirmaron estado base
+        // Check that all devices confirmed base state
         _allSafe := TRUE;
         FOR _n := 1 TO nDevices DO
             IF Devices[_n].Config.Enabled AND Devices[_n].Status.StDone THEN
@@ -636,7 +636,7 @@ CASE Ctrl.Status.State OF
 
     // ── HOLDING ──────────────────────────────────────────────────────────────
     ST_HOLDING:
-        // Comandar estado seguro sin perder StStep
+        // Command a safe state without losing StStep
         FOR _n := 1 TO nDevices DO
             IF Devices[_n].Config.Enabled THEN
                 Devices[_n].Commands.CmdAuto     := FALSE;
@@ -651,7 +651,7 @@ CASE Ctrl.Status.State OF
             END_IF;
         END_FOR;
 
-        // Timeout de HOLDING → ABORTING si no se estabiliza
+        // HOLDING timeout → ABORTING if it doesn't stabilize
         _tHoldTout(
             IN := (Ctrl.Config.HoldTimeout > 0.0),
             PT := DINT_TO_TIME(REAL_TO_DINT(Ctrl.Config.HoldTimeout * 1000.0)));
@@ -673,7 +673,7 @@ CASE Ctrl.Status.State OF
             Ctrl.Status.State := ST_RESUMING;
         END_IF;
 
-        // Auto-resume: si la falla se limpió y Config.AutoResume = TRUE
+        // Auto-resume: if the fault cleared and Config.AutoResume = TRUE
         IF Ctrl.Config.AutoResume THEN
             _allSafe := TRUE;
             FOR _n := 1 TO nDevices DO
@@ -700,7 +700,7 @@ CASE Ctrl.Status.State OF
 
     // ── RESUMING ─────────────────────────────────────────────────────────────
     ST_RESUMING:
-        // Verificar condiciones antes de retomar
+        // Check conditions before resuming
         _allSafe := TRUE;
         FOR _n := 1 TO nDevices DO
             IF Devices[_n].Config.Enabled THEN
@@ -778,7 +778,7 @@ CASE Ctrl.Status.State OF
 
     // ── ABORTING ─────────────────────────────────────────────────────────────
     ST_ABORTING:
-        // Cierre de emergencia — más agresivo, sin esperar confirmación de posición
+        // Emergency shutdown — more aggressive, doesn't wait for position confirmation
         FOR _n := 1 TO nDevices DO
             IF Devices[_n].Config.Enabled THEN
                 Devices[_n].Commands.CmdAuto     := FALSE;
@@ -790,7 +790,7 @@ CASE Ctrl.Status.State OF
             IN := TRUE,
             PT := DINT_TO_TIME(REAL_TO_DINT(Ctrl.Config.StopTimeout * 1000.0)));
 
-        // En ABORTING no esperamos confirmación de dispositivos — solo timeout
+        // In ABORTING we don't wait for device confirmation — only the timeout
         IF _tStopTout.Q THEN
             Ctrl.Status.State := ST_ABORTED;
             _tStopTout(IN := FALSE, PT := T#0MS);
@@ -798,7 +798,7 @@ CASE Ctrl.Status.State OF
 
     // ── ABORTED ──────────────────────────────────────────────────────────────
     ST_ABORTED:
-        // Reset solo si E-Stop OK y comando de reset
+        // Reset only if E-Stop OK and reset command given
         IF Ctrl.Commands.CmdReset AND NOT _prevReset
            AND Ctrl.Interlocks.IntlkEstop THEN
             Ctrl.Status.State     := ST_IDLE;
@@ -824,7 +824,7 @@ Ctrl.Status.StStopped    := (Ctrl.Status.State = ST_STOPPED);
 Ctrl.Status.StAborting   := (Ctrl.Status.State = ST_ABORTING);
 Ctrl.Status.StAborted    := (Ctrl.Status.State = ST_ABORTED);
 
-// ── Memorias de flanco ────────────────────────────────────────────────────────
+// ── Edge-detection memory ────────────────────────────────────────────────────
 _prevStart  := Ctrl.Commands.CmdStart;
 _prevStop   := Ctrl.Commands.CmdStop;
 _prevPause  := Ctrl.Commands.CmdPause;
@@ -839,7 +839,7 @@ END_FUNCTION_BLOCK
 
 ## 6. FB_SeqMaster
 
-**Número sugerido:** FB210
+**Suggested number:** FB210
 
 ```scl
 FUNCTION_BLOCK "FB_SeqMaster"
@@ -850,7 +850,7 @@ END_VAR
 
 VAR_IN_OUT
     Ctrl        : "UDT_MasterCtrl";
-    SubCtrl     : ARRAY[1..8] OF "UDT_SeqCtrl";    // Ctrl de cada Runner
+    SubCtrl     : ARRAY[1..8] OF "UDT_SeqCtrl";    // Ctrl of each Runner
 END_VAR
 
 VAR
@@ -882,10 +882,10 @@ VAR CONSTANT
 END_VAR
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CUERPO
+// BODY
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ── E-Stop y CmdAbort globales ────────────────────────────────────────────────
+// ── Global E-Stop and CmdAbort ────────────────────────────────────────────────
 IF (Ctrl.Commands.CmdAbort AND NOT _prevAbort)
    OR NOT Ctrl.Interlocks.IntlkEstop THEN
     Ctrl.Status.State := ST_ABORTING;
@@ -894,7 +894,7 @@ IF (Ctrl.Commands.CmdAbort AND NOT _prevAbort)
     END_FOR;
 END_IF;
 
-// ── Detectar fallas en sub-secuencias ─────────────────────────────────────────
+// ── Detect sub-sequence faults ─────────────────────────────────────────
 FOR _n := 1 TO nSubSeqs DO
     IF SubCtrl[_n].Status.StAborted OR SubCtrl[_n].Status.StHeld THEN
         _faultSub := INT_TO_USINT(_n);
@@ -910,7 +910,7 @@ FOR _n := 1 TO nSubSeqs DO
                     FOR _n := 1 TO nSubSeqs DO
                         SubCtrl[_n].Commands.CmdAbort := TRUE;
                     END_FOR;
-                1:  // AbortOnly — solo el runner fallido, los demás continúan
+                1:  // AbortOnly — only the failed runner, the others continue
                     Ctrl.Faults.FaultSubSeq     := _faultSub;
                     Ctrl.Faults.FltAny          := TRUE;
                 2:  // HoldAll
@@ -920,7 +920,7 @@ FOR _n := 1 TO nSubSeqs DO
                     FOR _n := 1 TO nSubSeqs DO
                         SubCtrl[_n].Commands.CmdStop := TRUE;
                     END_FOR;
-                3:  // HoldOnly — solo el runner fallido
+                3:  // HoldOnly — only the failed runner
                     Ctrl.Faults.FaultSubSeq     := _faultSub;
                     Ctrl.Faults.FltAny          := TRUE;
             END_CASE;
@@ -928,7 +928,7 @@ FOR _n := 1 TO nSubSeqs DO
     END_IF;
 END_FOR;
 
-// ── Máquina de estados del Master ─────────────────────────────────────────────
+// ── Master state machine ─────────────────────────────────────────────────
 CASE Ctrl.Status.State OF
 
     ST_IDLE:
@@ -937,7 +937,7 @@ CASE Ctrl.Status.State OF
            AND Ctrl.Interlocks.IntlkEstop THEN
             Ctrl.Status.State  := ST_EXECUTE;
             Ctrl.Status.StDone := FALSE;
-            // Lanzar sub-secuencias según configuración
+            // Launch sub-sequences per configuration
             FOR _n := 1 TO nSubSeqs DO
                 SubCtrl[_n].Commands.CmdStart    := TRUE;
                 SubCtrl[_n].Interlocks.IntlkReady  := TRUE;
@@ -946,12 +946,12 @@ CASE Ctrl.Status.State OF
         END_IF;
 
     ST_EXECUTE:
-        // Propagar E-Stop a sub-secuencias
+        // Propagate E-Stop to sub-sequences
         FOR _n := 1 TO nSubSeqs DO
             SubCtrl[_n].Interlocks.IntlkEstop := Ctrl.Interlocks.IntlkEstop;
         END_FOR;
 
-        // Verificar si todas las sub-secuencias completaron
+        // Check whether all sub-sequences have completed
         _allDone := TRUE;
         FOR _n := 1 TO nSubSeqs DO
             IF NOT SubCtrl[_n].Status.StComplete
@@ -1055,7 +1055,7 @@ Ctrl.Status.StPaused  := (Ctrl.Status.State = ST_PAUSED);
 Ctrl.Status.StStopped := (Ctrl.Status.State = ST_STOPPED);
 Ctrl.Status.StAborted := (Ctrl.Status.State = ST_ABORTED);
 
-// ── Memorias de flanco ─────────────────────────────────────────────────────────
+// ── Edge-detection memory ─────────────────────────────────────────────────────
 _prevStart  := Ctrl.Commands.CmdStart;
 _prevStop   := Ctrl.Commands.CmdStop;
 _prevPause  := Ctrl.Commands.CmdPause;
@@ -1068,9 +1068,9 @@ END_FUNCTION_BLOCK
 
 ---
 
-## 7. Cómo armarlo en TIA Portal
+## 7. How to set it up in TIA Portal
 
-### Orden de creación
+### Creation order
 
 ```
 1. UDT_MasterSubConfig
@@ -1078,36 +1078,36 @@ END_FUNCTION_BLOCK
 3. UDT_SeqStep
 4. UDT_SeqCtrl
 5. UDT_MasterCtrl
-6. DB_DEVICES          (optimized OFF si usás PUT/GET)
+6. DB_DEVICES          (optimized OFF if using PUT/GET)
 7. DB_SEQUENCES
 8. FB_SeqRunner [FB211]
 9. FB_SeqMaster [FB210]
 ```
 
-### Inicialización en OB100
+### Initialization in OB100
 
 ```scl
-// Configurar runners
+// Configure runners
 "DB_SEQUENCES".Sub1Ctrl.Config.StopTimeout   := 5.0;
 "DB_SEQUENCES".Sub1Ctrl.Config.HoldTimeout   := 30.0;
 "DB_SEQUENCES".Sub1Ctrl.Config.AutoResume    := FALSE;
 "DB_SEQUENCES".Sub1Ctrl.Config.AutoResumeTime := 0.0;
 
-// Configurar política del master por sub-secuencia
+// Configure the master's policy per sub-sequence
 "DB_SEQUENCES".MainCtrl.Config.SubPolicy[1].OnFaultPolicy   := USInt#2;  // HoldAll
 "DB_SEQUENCES".MainCtrl.Config.SubPolicy[1].OnTimeoutPolicy := USInt#0;  // AbortAll
 "DB_SEQUENCES".MainCtrl.Config.SubPolicy[1].IsMandatory     := TRUE;
 
-// Configurar dispositivos
+// Configure devices
 "DB_DEVICES".Valves[1].Config.DevType     := USInt#0;
 "DB_DEVICES".Valves[1].Config.Enabled     := TRUE;
 "DB_DEVICES".Valves[1].Config.FltSeverity := USInt#1;  // Hold
 ```
 
-### Conexión con FBs de dispositivo existentes
+### Connecting to existing device FBs
 
 ```scl
-// El FB de dispositivo lee Commands y escribe Status — un único IN_OUT
+// The device FB reads Commands and writes Status — a single IN_OUT
 "FB_Valve".Valve_01(
     CmdAuto  := "DB_DEVICES".Valves[1].Commands.CmdAuto,
     StDone   => "DB_DEVICES".Valves[1].Status.StDone,
@@ -1118,22 +1118,22 @@ END_FUNCTION_BLOCK
 
 ---
 
-## 8. Cómo usarlo — ejemplos
+## 8. How to use it — examples
 
-### Ejemplo 1: Routing de válvulas — 5 routings exclusivos
+### Example 1: Valve routing — 5 mutually exclusive routings
 
 ```scl
-// En FB_FillingMaster, lógica de exclusión de routings:
-// Solo se envía CmdStart al runner del routing solicitado.
-// Handoff controlado: esperar StStopped del activo antes de arrancar el nuevo.
+// In FB_FillingMaster, routing-exclusion logic:
+// CmdStart is only sent to the requested routing's runner.
+// Controlled handoff: wait for the active one's StStopped before starting the new one.
 
 IF #RoutingRequest <> #RoutingActive THEN
-    // Paso 1: detener routing activo
+    // Step 1: stop the active routing
     "DB_SEQUENCES".Sub1Ctrl.Commands.CmdStop := (#RoutingActive = 1);
     "DB_SEQUENCES".Sub2Ctrl.Commands.CmdStop := (#RoutingActive = 2);
     // ... etc
 
-    // Paso 2: cuando el activo confirmó parada, arrancar el nuevo
+    // Step 2: once the active one confirms it stopped, start the new one
     IF "DB_SEQUENCES".Sub1Ctrl.Status.StStopped OR
        "DB_SEQUENCES".Sub1Ctrl.Status.StIdle THEN
         #RoutingActive := #RoutingRequest;
@@ -1143,16 +1143,16 @@ IF #RoutingRequest <> #RoutingActive THEN
 END_IF;
 ```
 
-### Ejemplo 2: Verificar estado para lógica de máquina
+### Example 2: Checking state for machine logic
 
 ```scl
-// Permiso de operación solo cuando secuencia está en EXECUTE y paso >= 3
+// Operation permissive only when the sequence is in EXECUTE and step >= 3
 IF "DB_SEQUENCES".Sub1Ctrl.Status.StExecute AND
    "DB_SEQUENCES".Sub1Ctrl.Status.StStep >= 3 THEN
     "Outputs".PumpPermit := TRUE;
 END_IF;
 
-// Alarma al gestor si el runner está en ABORTED
+// Alarm the manager if the runner is in ABORTED
 IF "DB_SEQUENCES".Sub1Ctrl.Status.StAborted THEN
     #AlarmSeqAborted    := TRUE;
     #AlarmFaultCode     := "DB_SEQUENCES".Sub1Ctrl.Faults.FaultCode;
@@ -1161,50 +1161,50 @@ IF "DB_SEQUENCES".Sub1Ctrl.Status.StAborted THEN
 END_IF;
 ```
 
-### Ejemplo 3: Auto-resume para falla transitoria de válvula
+### Example 3: Auto-resume for a transient valve fault
 
 ```scl
-// En OB100: configurar runner para auto-resume con 5 segundos de confirmación
+// In OB100: configure the runner for auto-resume with a 5-second confirmation window
 "DB_SEQUENCES".Sub1Ctrl.Config.AutoResume     := TRUE;
 "DB_SEQUENCES".Sub1Ctrl.Config.AutoResumeTime := 5.0;
 
-// Válvula con FltSeverity=1 (Hold): si pierde fbk y lo recupera en < 5s,
-// el runner vuelve a EXECUTE automáticamente desde el mismo paso.
-// Si no se recupera, queda en HELD hasta CmdResume manual.
+// A valve with FltSeverity=1 (Hold): if it loses feedback and recovers it in < 5s,
+// the runner automatically returns to EXECUTE from the same step.
+// If it doesn't recover, it stays in HELD until a manual CmdResume.
 ```
 
 ---
 
-## 9. Escalado y topologías
+## 9. Scaling and topologies
 
-### Topología A — Máquina simple (standalone Runner)
+### Topology A — Simple machine (standalone Runner)
 
 ```
 OB1 → FB_SeqRunner → DB_DEVICES.Valves[1..8]
 ```
-Sin Master. Comandos desde HMI directo a `DB_SEQUENCES.Sub1Ctrl.Commands`.
+No Master. Commands go straight from the HMI to `DB_SEQUENCES.Sub1Ctrl.Commands`.
 
-### Topología B — Routings exclusivos (Master como árbitro)
+### Topology B — Mutually exclusive routings (Master as arbiter)
 
 ```
 FB_SeqMaster
-  ├── FB_SeqRunner [Routing_A]  ← solo uno activo a la vez
+  ├── FB_SeqRunner [Routing_A]  ← only one active at a time
   ├── FB_SeqRunner [Routing_B]
   └── FB_SeqRunner [Routing_C]
 ```
-Master no corre pasos — solo gestiona exclusión y handoff entre runners.
+The Master doesn't run steps — it only manages exclusion and handoff between runners.
 
-### Topología C — Proceso complejo con paralelos
+### Topology C — Complex process with parallel branches
 
 ```
 FB_SeqMaster "Production"
-  ├── FB_SeqRunner [Fill]      → paralelo
-  ├── FB_SeqRunner [Heat]      → paralelo
-  └── FB_SeqRunner [Agitate]   → paralelo, IsMandatory=FALSE
+  ├── FB_SeqRunner [Fill]      → parallel
+  ├── FB_SeqRunner [Heat]      → parallel
+  └── FB_SeqRunner [Agitate]   → parallel, IsMandatory=FALSE
 ```
-Los tres corren simultáneamente. Agitate puede fallar sin abortar la producción.
+All three run simultaneously. Agitate can fail without aborting production.
 
-### Topología D — Jerárquica multi-área
+### Topology D — Hierarchical, multi-area
 
 ```
 FB_SeqMaster "Plant"
@@ -1215,36 +1215,36 @@ FB_SeqMaster "Plant"
        ├── FB_SeqRunner [...]
        └── FB_SeqRunner [...]
 ```
-Interlocks cruzados entre masters de área:
+Cross-interlocks between area masters:
 ```scl
 "DB_SEQ_CIP".MainCtrl.Interlocks.IntlkReady :=
-    "DB_SEQ_FILLING".MainCtrl.Status.StIdle;  // CIP solo si Filling está idle
+    "DB_SEQ_FILLING".MainCtrl.Status.StIdle;  // CIP only if Filling is idle
 ```
 
 ---
 
-## 10. Notas y limitaciones
+## 10. Notes and limitations
 
-### Comandos en el Master: pulsos vs niveles
-Los comandos (`CmdStart`, `CmdStop`, etc.) en `UDT_SeqCtrl.Commands` son Bools de nivel.
-El Runner detecta el flanco internamente. El HMI puede escribir un pulso corto o un nivel —
-ambos funcionan. Recomendado: pulsos desde HMI para evitar que el comando quede "pegado".
+### Commands on the Master: pulses vs. levels
+The commands (`CmdStart`, `CmdStop`, etc.) in `UDT_SeqCtrl.Commands` are level Bools.
+The Runner detects the edge internally. The HMI can write either a short pulse or a level —
+both work. Recommended: use pulses from the HMI to avoid the command getting "stuck."
 
-### Propagación de comandos Master → Sub
-El Master escribe directamente en `SubCtrl[n].Commands`. Esto significa que el Master
-y el operador pueden competir si el HMI también escribe en esos campos. Convención
-recomendada: el HMI escribe en `MasterCtrl.Commands`, el Master propaga a los runners.
-No permitir escritura directa del HMI a `SubCtrl`.
+### Master → Sub command propagation
+The Master writes directly into `SubCtrl[n].Commands`. This means the Master
+and the operator could compete if the HMI also writes to those fields. Recommended
+convention: the HMI writes to `MasterCtrl.Commands`, and the Master propagates to the runners.
+Don't allow the HMI to write directly to `SubCtrl`.
 
-### CmdClear — no implementado en esta versión
-PackML define `CmdClear` para limpiar fallas sin cambiar estado. Implementación sugerida:
-en estado HELD o ABORTED, `CmdClear` limpia `Faults.*` sin transición de estado.
-Agregar como extensión si el HMI lo requiere.
+### CmdClear — not implemented in this version
+PackML defines `CmdClear` to clear faults without changing state. Suggested implementation:
+in the HELD or ABORTED state, `CmdClear` clears `Faults.*` without a state transition.
+Add as an extension if the HMI requires it.
 
-### REAL_TO_TIME en S7-1200
-Usar siempre `DINT_TO_TIME(REAL_TO_DINT(valor * 1000.0))` como se muestra en el código.
-`REAL_TO_TIME` directo no está disponible en todos los firmware de S7-1200.
+### REAL_TO_TIME on S7-1200
+Always use `DINT_TO_TIME(REAL_TO_DINT(value * 1000.0))` as shown in the code.
+`REAL_TO_TIME` directly is not available on all S7-1200 firmware versions.
 
-### Límite de 32 dispositivos por Runner
-Determinado por el ancho del `DWORD` en ActMask/CondMask.
-Para S7-1500: reemplazar `DWORD` por `LWORD` y ajustar los SHR para extender a 64 dispositivos.
+### 32-device limit per Runner
+Determined by the width of the `DWORD` in ActMask/CondMask.
+For S7-1500: replace `DWORD` with `LWORD` and adjust the SHR calls to extend to 64 devices.

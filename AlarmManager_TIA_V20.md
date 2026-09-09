@@ -1,68 +1,68 @@
 # Alarm Manager — TIA Portal V20
-**Arquitectura: FB_AlarmHandler + FC_AlarmManager**
-Versión 1.0
+**Architecture: FB_AlarmHandler + FC_AlarmManager**
+Version 1.0
 
 ---
 
-## Tabla de contenidos
-1. [Arquitectura general](#1-arquitectura-general)
+## Table of contents
+1. [General architecture](#1-general-architecture)
 2. [UDTs](#2-udts)
-3. [DBs globales](#3-dbs-globales)
+3. [Global DBs](#3-global-dbs)
 4. [FB_AlarmHandler](#4-fb_alarmhandler)
 5. [FC_AlarmManager](#5-fc_alarmmanager)
-6. [Cómo armarlo en TIA Portal](#6-cómo-armarlo-en-tia-portal)
-7. [Cómo usarlo — ejemplos](#7-cómo-usarlo--ejemplos)
-8. [Escalado a proyectos grandes](#8-escalado-a-proyectos-grandes)
-9. [Notas y limitaciones](#9-notas-y-limitaciones)
+6. [How to set it up in TIA Portal](#6-how-to-set-it-up-in-tia-portal)
+7. [How to use it — examples](#7-how-to-use-it--examples)
+8. [Scaling to large projects](#8-scaling-to-large-projects)
+9. [Notes and limitations](#9-notes-and-limitations)
 
 ---
 
-## 1. Arquitectura general
+## 1. General architecture
 
 ```
-OB1 (cada ciclo)
+OB1 (every cycle)
  └── FC_AlarmManager
-      ├── FB_AlarmHandler (instancia Motor_01)  ──► DB_ALARMS.Motors[0]  ──► DB_HIST
-      ├── FB_AlarmHandler (instancia Motor_02)  ──► DB_ALARMS.Motors[1]  ──► DB_HIST
-      ├── FB_AlarmHandler (instancia Sensor_01) ──► DB_ALARMS.Sensors[0] ──► DB_HIST
+      ├── FB_AlarmHandler (instance Motor_01)  ──► DB_ALARMS.Motors[0]  ──► DB_HIST
+      ├── FB_AlarmHandler (instance Motor_02)  ──► DB_ALARMS.Motors[1]  ──► DB_HIST
+      ├── FB_AlarmHandler (instance Sensor_01) ──► DB_ALARMS.Sensors[0] ──► DB_HIST
       ├── ...
-      └── CmdAckAll / CmdClear (procesado al final del FC)
+      └── CmdAckAll / CmdClear (processed at the end of the FC)
 ```
 
-**Principios de diseño:**
-- **Acceso O(1)** al estado de cada alarma — sin búsquedas lineales.
-- **Una instancia de FB por alarma** — cada una tiene su propio estado de flanco.
-- **Historial opcional** — se desactiva con `EnableHistory := FALSE` para CPUs sin HMI o recursos limitados.
-- **Dos capas separadas**: estado activo (PLC lo usa para lógica) e historial (HMI lo lee por OPC-UA/PUT-GET).
+**Design principles:**
+- **O(1) access** to each alarm's state — no linear searches.
+- **One FB instance per alarm** — each one has its own edge-detection state.
+- **Optional history** — disabled with `EnableHistory := FALSE` for CPUs without an HMI or with limited resources.
+- **Two separate layers**: active state (used by PLC logic) and history (read by HMI over OPC-UA/PUT-GET).
 
 ---
 
 ## 2. UDTs
 
-Crear en TIA Portal en el orden indicado (dependencias entre UDTs).
+Create in TIA Portal in the order shown (there are dependencies between UDTs).
 
 ### UDT_AlarmState
-> Estado activo de una alarma individual. Vive en `DB_ALARMS`.
+> Active state of a single alarm. Lives in `DB_ALARMS`.
 
 ```scl
 TYPE "UDT_AlarmState"
     STRUCT
-        AlarmID     : DInt;         // Identificador único de la alarma
-        Active      : Bool;         // TRUE = alarma activa en este momento
-        Acknowledged: Bool;         // TRUE = operador confirmó la alarma
-        TimeRaised  : DTL;          // Timestamp de activación (última)
-        TimeCleared : DTL;          // Timestamp de desactivación (última)
-        Count       : Int;          // Cantidad de veces que se activó
+        AlarmID     : DInt;         // Unique alarm identifier
+        Active      : Bool;         // TRUE = alarm currently active
+        Acknowledged: Bool;         // TRUE = operator acknowledged the alarm
+        TimeRaised  : DTL;          // Timestamp of (most recent) activation
+        TimeCleared : DTL;          // Timestamp of (most recent) deactivation
+        Count       : Int;          // Number of times it has activated
         Severity    : USInt;        // 0=Info  1=Warning  2=Error  3=Critical
-        Category    : USInt;        // Categoría: 1=Motor 2=Sensor 3=Safety etc.
-        Device      : USInt;        // ID del dispositivo dentro de la categoría
+        Category    : USInt;        // Category: 1=Motor 2=Sensor 3=Safety etc.
+        Device      : USInt;        // Device ID within the category
     END_STRUCT;
 END_TYPE
 ```
 
 ### UDT_AlarmHistEntry
-> Un registro de evento en el historial. Vive en `DB_HIST`.
-> Sin campo `Message` — el HMI mapea los textos usando `AlarmID` o la combinación `(Severity, Category, Device)`.
+> One event record in the history. Lives in `DB_HIST`.
+> No `Message` field — the HMI maps text using `AlarmID` or the `(Severity, Category, Device)` combination.
 
 ```scl
 TYPE "UDT_AlarmHistEntry"
@@ -74,52 +74,52 @@ TYPE "UDT_AlarmHistEntry"
         TimeRaised  : DTL;
         TimeCleared : DTL;
         Acknowledged: Bool;
-        Valid       : Bool;         // FALSE = entrada vacía (slot libre en el ring buffer)
+        Valid       : Bool;         // FALSE = empty entry (free slot in the ring buffer)
     END_STRUCT;
 END_TYPE
 ```
 
 ### UDT_AlarmHistBuffer
-> Ring buffer del historial. Tamaño configurable por proyecto.
+> History ring buffer. Size configurable per project.
 
 ```scl
 TYPE "UDT_AlarmHistBuffer"
     STRUCT
-        Head        : Int;          // Próximo índice de escritura
-        Tail        : Int;          // Próximo índice de lectura (consumo externo)
-        Count       : Int;          // Entradas válidas actualmente en el buffer
-        MaxSize     : Int;          // Tamaño máximo (igual que el array declarado)
-        Full        : Bool;         // TRUE = buffer lleno, siguiente escritura sobreescribe
-        Entries     : Array[0..99] of "UDT_AlarmHistEntry";  // Ajustar tamaño según proyecto
+        Head        : Int;          // Next write index
+        Tail        : Int;          // Next read index (external consumption)
+        Count       : Int;          // Currently valid entries in the buffer
+        MaxSize     : Int;          // Maximum size (same as the declared array)
+        Full        : Bool;         // TRUE = buffer full, next write overwrites
+        Entries     : Array[0..99] of "UDT_AlarmHistEntry";  // Adjust size per project
     END_STRUCT;
 END_TYPE
 ```
 
-> **Nota:** Si necesitás más o menos historial, cambiá el array `Entries` a `Array[0..N-1]`
-> y ajustá `MaxSize` al mismo valor N en `DB_HIST`. El código del FB no cambia.
+> **Note:** If you need more or less history, change the `Entries` array to `Array[0..N-1]`
+> and set `MaxSize` to the same value N in `DB_HIST`. The FB's code doesn't change.
 
 ---
 
-## 3. DBs globales
+## 3. Global DBs
 
-### DB_ALARMS — Estado activo por categorías
+### DB_ALARMS — Active state by category
 
 ```scl
 DATA_BLOCK "DB_ALARMS"
     VAR
         Motors   : Array[0..99] of "UDT_AlarmState";   // IDs 0..99
-        Sensors  : Array[0..99] of "UDT_AlarmState";   // IDs 100..199 (convención)
+        Sensors  : Array[0..99] of "UDT_AlarmState";   // IDs 100..199 (convention)
         Safety   : Array[0..49]  of "UDT_AlarmState";  // IDs 200..249
         General  : Array[0..49]  of "UDT_AlarmState";  // IDs 250..299
-        // Agregar categorías según proyecto
+        // Add categories as needed per project
     END_VAR
 END_DATA_BLOCK
 ```
 
-> Cada proyecto define solo las categorías que necesita.
-> El índice del array es el índice dentro de la categoría, no el AlarmID absoluto.
+> Each project only defines the categories it needs.
+> The array index is the index within the category, not the absolute AlarmID.
 
-### DB_HIST — Historial compartido
+### DB_HIST — Shared history
 
 ```scl
 DATA_BLOCK "DB_HIST"
@@ -129,41 +129,41 @@ DATA_BLOCK "DB_HIST"
 END_DATA_BLOCK
 ```
 
-> Inicializar `DB_HIST`.Buf.MaxSize := 100 en el primer scan (OB100 o lógica de init).
+> Initialize `DB_HIST`.Buf.MaxSize := 100 on the first scan (OB100 or init logic).
 
 ---
 
 ## 4. FB_AlarmHandler
 
-**Número sugerido:** FB100
-**Función:** Gestiona el ciclo de vida completo de una alarma individual.
+**Suggested number:** FB100
+**Function:** Manages the complete lifecycle of a single alarm.
 
 ```scl
 FUNCTION_BLOCK "FB_AlarmHandler"
 
 // ---------------------------------------------------------------------------
-// INTERFAZ
+// INTERFACE
 // ---------------------------------------------------------------------------
 VAR_INPUT
-    IsActive        : Bool;         // Señal de la alarma (del proceso)
-    AlarmID         : DInt;         // ID único de esta alarma
-    Category        : USInt;        // Categoría (para historial)
-    Severity        : USInt;        // Severidad (para historial)
-    Device          : USInt;        // Dispositivo (para historial)
-    CmdAck          : Bool;         // ACK individual de esta alarma
-    EnableHistory   : Bool;         // FALSE = no escribir al historial (ahorra ciclo)
+    IsActive        : Bool;         // Alarm signal (from the process)
+    AlarmID         : DInt;         // Unique ID for this alarm
+    Category        : USInt;        // Category (for history)
+    Severity        : USInt;        // Severity (for history)
+    Device          : USInt;        // Device (for history)
+    CmdAck          : Bool;         // Individual ACK for this alarm
+    EnableHistory   : Bool;         // FALSE = don't write to history (saves cycle time)
 END_VAR
 
 VAR_IN_OUT
-    State           : "UDT_AlarmState";         // Entrada en DB_ALARMS (lectura/escritura directa)
-    HistBuf         : "UDT_AlarmHistBuffer";    // Ring buffer compartido en DB_HIST
+    State           : "UDT_AlarmState";         // Entry in DB_ALARMS (direct read/write)
+    HistBuf         : "UDT_AlarmHistBuffer";    // Shared ring buffer in DB_HIST
 END_VAR
 
-VAR                                             // Estáticas — persisten entre ciclos
+VAR                                             // Static — persist between cycles
     _PrevActive     : Bool;
     _PrevAck        : Bool;
-    _HistIdx        : Int;                      // Índice de esta alarma en el historial (para TimeCleared)
-    _InHistory      : Bool;                     // TRUE = hay entrada abierta en el historial
+    _HistIdx        : Int;                      // This alarm's index in the history (for TimeCleared)
+    _InHistory      : Bool;                     // TRUE = there is an open entry in the history
 END_VAR
 
 VAR_TEMP
@@ -172,13 +172,13 @@ VAR_TEMP
 END_VAR
 
 // ---------------------------------------------------------------------------
-// CUERPO
+// BODY
 // ---------------------------------------------------------------------------
 
 // ── 1. RISING EDGE: IsActive ────────────────────────────────────────────────
 IF IsActive AND NOT _PrevActive THEN
 
-    // Actualizar estado activo (O(1) — el caller ya indexó correctamente)
+    // Update active state (O(1) — the caller already indexed correctly)
     State.Active        := TRUE;
     State.Acknowledged  := FALSE;
     State.AlarmID       := AlarmID;
@@ -189,15 +189,15 @@ IF IsActive AND NOT _PrevActive THEN
 
     RD_SYS_T(OUT => _sysTime);
     State.TimeRaised    := _sysTime;
-    State.TimeCleared   := DTL#1970-01-01-00:00:00;    // Reset timestamp cleared
+    State.TimeCleared   := DTL#1970-01-01-00:00:00;    // Reset cleared timestamp
 
-    // ── Escribir al historial (si está habilitado) ──
+    // ── Write to history (if enabled) ──
     IF EnableHistory THEN
-        // Guardar índice donde vamos a escribir para poder actualizar TimeCleared después
+        // Save the index we're about to write so TimeCleared can be updated later
         _HistIdx := HistBuf.Head;
         _InHistory := TRUE;
 
-        // Escribir entrada
+        // Write entry
         HistBuf.Entries[HistBuf.Head].AlarmID       := AlarmID;
         HistBuf.Entries[HistBuf.Head].Severity      := Severity;
         HistBuf.Entries[HistBuf.Head].Category      := Category;
@@ -207,17 +207,17 @@ IF IsActive AND NOT _PrevActive THEN
         HistBuf.Entries[HistBuf.Head].Acknowledged  := FALSE;
         HistBuf.Entries[HistBuf.Head].Valid         := TRUE;
 
-        // Detectar buffer lleno antes de avanzar Head
+        // Detect a full buffer before advancing Head
         IF HistBuf.Count >= HistBuf.MaxSize THEN
             HistBuf.Full := TRUE;
-            // Ring buffer lleno: avanzar Tail (descartamos el evento más antiguo)
+            // Ring buffer full: advance Tail (discard the oldest event)
             HistBuf.Tail := (HistBuf.Tail + 1) MOD HistBuf.MaxSize;
         ELSE
             HistBuf.Count := HistBuf.Count + 1;
             HistBuf.Full  := FALSE;
         END_IF;
 
-        // Avanzar Head
+        // Advance Head
         HistBuf.Head := (HistBuf.Head + 1) MOD HistBuf.MaxSize;
     END_IF;
 
@@ -231,7 +231,7 @@ IF NOT IsActive AND _PrevActive THEN
     RD_SYS_T(OUT => _sysTime);
     State.TimeCleared := _sysTime;
 
-    // Actualizar TimeCleared en la entrada del historial
+    // Update TimeCleared on the history entry
     IF EnableHistory AND _InHistory THEN
         HistBuf.Entries[_HistIdx].TimeCleared := _sysTime;
         _InHistory := FALSE;
@@ -239,17 +239,17 @@ IF NOT IsActive AND _PrevActive THEN
 
 END_IF;
 
-// ── 3. ACK individual ───────────────────────────────────────────────────────
+// ── 3. Individual ACK ───────────────────────────────────────────────────────
 IF CmdAck AND NOT _PrevAck THEN
     State.Acknowledged := TRUE;
 
-    // Actualizar Acknowledged en el historial
+    // Update Acknowledged on the history entry
     IF EnableHistory AND _InHistory THEN
         HistBuf.Entries[_HistIdx].Acknowledged := TRUE;
     END_IF;
 END_IF;
 
-// ── 4. Actualizar memorias de flanco ────────────────────────────────────────
+// ── 4. Update edge-detection memory ─────────────────────────────────────────
 _PrevActive := IsActive;
 _PrevAck    := CmdAck;
 
@@ -260,43 +260,43 @@ END_FUNCTION_BLOCK
 
 ## 5. FC_AlarmManager
 
-**Número sugerido:** FC100
-**Función:** Wrapper que llama todas las instancias de `FB_AlarmHandler` y procesa comandos globales.
+**Suggested number:** FC100
+**Function:** Wrapper that calls every `FB_AlarmHandler` instance and processes global commands.
 
 ```scl
 FUNCTION "FC_AlarmManager" : Void
 
 // ---------------------------------------------------------------------------
-// INTERFAZ
+// INTERFACE
 // ---------------------------------------------------------------------------
 VAR_INPUT
-    CmdAckAll       : Bool;         // ACK de todas las alarmas activas
-    CmdClear        : Bool;         // Limpiar historial completo
-    EnableHistory   : Bool;         // Habilitar/deshabilitar historial globalmente
+    CmdAckAll       : Bool;         // ACK all active alarms
+    CmdClear        : Bool;         // Clear the entire history
+    EnableHistory   : Bool;         // Enable/disable history globally
 END_VAR
 
 VAR_TEMP
     _i              : Int;
     _sysTime        : DTL;
-    _PrevAckAll     : Bool;         // ATENCIÓN: ver nota abajo (*)
+    _PrevAckAll     : Bool;         // NOTE: see note below (*)
     _PrevClear      : Bool;
 END_VAR
 
 // ---------------------------------------------------------------------------
-// CUERPO
+// BODY
 // ---------------------------------------------------------------------------
 
-// ── LLAMADAS A INSTANCIAS DE FB_AlarmHandler ─────────────────────────────
-// Una línea por alarma. El índice del array ES el acceso directo O(1).
-// Patrón: FB_AlarmHandler.NombreInstancia(
-//             IsActive       := <señal del proceso>,
-//             AlarmID        := <constante>,
-//             Category       := <constante>,
-//             Severity       := <constante>,
-//             Device         := <constante>,
-//             CmdAck         := <bit de ACK individual>,
+// ── CALLS TO FB_AlarmHandler INSTANCES ─────────────────────────────
+// One line per alarm. The array index IS the direct O(1) access.
+// Pattern: FB_AlarmHandler.InstanceName(
+//             IsActive       := <process signal>,
+//             AlarmID        := <constant>,
+//             Category       := <constant>,
+//             Severity       := <constant>,
+//             Device         := <constant>,
+//             CmdAck         := <individual ACK bit>,
 //             EnableHistory  := EnableHistory,
-//             State          := "DB_ALARMS".<Categoria>[<indice>],
+//             State          := "DB_ALARMS".<Category>[<index>],
 //             HistBuf        := "DB_HIST".Buf);
 
 "FB_AlarmHandler".Motor_OverTemp(
@@ -332,16 +332,16 @@ END_VAR
     State           := "DB_ALARMS".Sensors[0],
     HistBuf         := "DB_HIST".Buf);
 
-// ... agregar instancias según el proyecto ...
+// ... add instances as needed per project ...
 
 
-// ── CmdAckAll — Flanco detectado aquí con VAR estática en el caller ──────
-// (*) ATENCIÓN: FC no tiene VAR estáticas. Hay dos opciones:
+// ── CmdAckAll — Edge detected here with a static VAR in the caller ──────
+// (*) NOTE: an FC has no static VARs. There are two options:
 //
-//   OPCIÓN A (recomendada): Mover CmdAckAll y CmdClear a un FB wrapper en lugar de FC.
-//   OPCIÓN B: Usar un bit de memoria M o un DB auxiliar para la memoria de flanco.
+//   OPTION A (recommended): move CmdAckAll and CmdClear to an FB wrapper instead of an FC.
+//   OPTION B: use an M memory bit or an auxiliary DB for the edge-detection memory.
 //
-// Ejemplo con Opción B (bit M0.0 = memoria flanco AckAll, M0.1 = memoria flanco Clear):
+// Example using Option B (bit M0.0 = AckAll edge memory, M0.1 = Clear edge memory):
 
 IF CmdAckAll AND NOT %M0.0 THEN
     FOR _i := 0 TO 99 DO
@@ -352,7 +352,7 @@ IF CmdAckAll AND NOT %M0.0 THEN
         "DB_ALARMS".Safety[_i].Acknowledged  := TRUE;
         "DB_ALARMS".General[_i].Acknowledged := TRUE;
     END_FOR;
-    // Marcar también el historial
+    // Also mark the history
     IF EnableHistory THEN
         FOR _i := 0 TO ("DB_HIST".Buf.MaxSize - 1) DO
             "DB_HIST".Buf.Entries[_i].Acknowledged := TRUE;
@@ -361,7 +361,7 @@ IF CmdAckAll AND NOT %M0.0 THEN
 END_IF;
 %M0.0 := CmdAckAll;
 
-// ── CmdClear — Limpiar historial ─────────────────────────────────────────
+// ── CmdClear — Clear history ─────────────────────────────────────────
 IF CmdClear AND NOT %M0.1 THEN
     "DB_HIST".Buf.Head  := 0;
     "DB_HIST".Buf.Tail  := 0;
@@ -376,45 +376,45 @@ END_IF;
 END_FUNCTION
 ```
 
-> **Recomendación:** Si CmdAckAll y CmdClear vienen del HMI con pulsos cortos, convertir
-> `FC_AlarmManager` en `FB_AlarmManager` para tener VAR estáticas propias y evitar
-> el uso de bits de memoria globales.
+> **Recommendation:** If CmdAckAll and CmdClear come from the HMI as short pulses, convert
+> `FC_AlarmManager` into `FB_AlarmManager` to have its own static VARs and avoid
+> relying on global memory bits.
 
 ---
 
-## 6. Cómo armarlo en TIA Portal
+## 6. How to set it up in TIA Portal
 
-### Orden de creación
+### Creation order
 
 ```
 1. UDT_AlarmState          (PLC types > Add new data type)
 2. UDT_AlarmHistEntry
 3. UDT_AlarmHistBuffer
-4. DB_ALARMS               (Global DB — sin optimización de acceso si usás PUT/GET)
-5. DB_HIST                 (Global DB — sin optimización de acceso si usás PUT/GET)
+4. DB_ALARMS               (Global DB — no optimized access if using PUT/GET)
+5. DB_HIST                 (Global DB — no optimized access if using PUT/GET)
 6. FB_AlarmHandler  [FB100]
 7. FC_AlarmManager  [FC100]
 ```
 
-### Configuración de DBs para OPC-UA / PUT-GET
+### DB configuration for OPC-UA / PUT-GET
 
-Si el HMI accede al historial por **OPC-UA** (S7-1200 FW4+):
-- `DB_HIST`: Optimized block access = **ON** ✅ (OPC-UA lo soporta y es más eficiente)
+If the HMI accesses the history over **OPC-UA** (S7-1200 FW4+):
+- `DB_HIST`: Optimized block access = **ON** ✅ (OPC-UA supports it and it's more efficient)
 
-Si usás **PUT/GET** (HMI Siemens clásico, acceso externo):
-- `DB_HIST`: Optimized block access = **OFF** ⚠️ (requerimiento de PUT/GET)
-- En propiedades del CPU: activar "Permit access with PUT/GET"
+If using **PUT/GET** (classic Siemens HMI, external access):
+- `DB_HIST`: Optimized block access = **OFF** ⚠️ (PUT/GET requirement)
+- In CPU properties: enable "Permit access with PUT/GET"
 
-### Instancias múltiples del FB
+### Multiple FB instances
 
-En TIA V15+, podés declarar las instancias como **Multi-instance** dentro del FC/FB padre,
-o como **DBs de instancia individuales**. Para proyectos grandes, multi-instance es más limpio.
+In TIA V15+, you can declare instances as **multi-instance** inside the parent FC/FB,
+or as **individual instance DBs**. For large projects, multi-instance is cleaner.
 
-### Inicialización (OB100 — Startup)
+### Initialization (OB100 — Startup)
 
 ```scl
-// En OB100, inicializar MaxSize del historial
-"DB_HIST".Buf.MaxSize := 100;  // Debe coincidir con el tamaño del array Entries
+// In OB100, initialize the history's MaxSize
+"DB_HIST".Buf.MaxSize := 100;  // Must match the size of the Entries array
 "DB_HIST".Buf.Head    := 0;
 "DB_HIST".Buf.Tail    := 0;
 "DB_HIST".Buf.Count   := 0;
@@ -423,12 +423,12 @@ o como **DBs de instancia individuales**. Para proyectos grandes, multi-instance
 
 ---
 
-## 7. Cómo usarlo — ejemplos
+## 7. How to use it — examples
 
-### Ejemplo 1: Máquina simple sin HMI (S7-1214, standalone)
+### Example 1: Simple machine without an HMI (S7-1214, standalone)
 
 ```scl
-// En FC_AlarmManager, todas las instancias con EnableHistory := FALSE
+// In FC_AlarmManager, all instances with EnableHistory := FALSE
 "FB_AlarmHandler".PressureHigh(
     IsActive       := "Process".Pressure > 10.0,
     AlarmID        := DInt#1,
@@ -436,96 +436,96 @@ o como **DBs de instancia individuales**. Para proyectos grandes, multi-instance
     Severity       := USInt#2,
     Device         := USInt#1,
     CmdAck         := "HMI".AckBtn,
-    EnableHistory  := FALSE,          // Sin historial — ahorra ciclo
+    EnableHistory  := FALSE,          // No history — saves cycle time
     State          := "DB_ALARMS".General[0],
     HistBuf        := "DB_HIST".Buf);
 ```
 
-### Ejemplo 2: Leer estado activo en lógica de máquina
+### Example 2: Reading active state in machine logic
 
 ```scl
-// El PLC consulta el estado directamente — acceso O(1), sin llamar al FB
+// The PLC queries the state directly — O(1) access, no need to call the FB
 IF "DB_ALARMS".Motors[0].Active AND
    "DB_ALARMS".Motors[0].Severity >= USInt#2 THEN
     "Outputs".EmergencyStop := TRUE;
 END_IF;
 
-// Verificar si todas las alarmas de motores están acknowledged
+// Check whether all motor alarms are acknowledged
 IF NOT "DB_ALARMS".Motors[0].Active AND
    NOT "DB_ALARMS".Motors[1].Active THEN
     "Outputs".MotorRunPermit := TRUE;
 END_IF;
 ```
 
-### Ejemplo 3: HMI leyendo historial por OPC-UA
+### Example 3: HMI reading history over OPC-UA
 
-El HMI lee `DB_HIST.Buf.Entries[0..N]` y muestra solo las entradas donde `Valid = TRUE`.
-Para el texto del mensaje, el HMI tiene una tabla interna:
+The HMI reads `DB_HIST.Buf.Entries[0..N]` and only displays entries where `Valid = TRUE`.
+For the message text, the HMI keeps an internal lookup table:
 
 ```
-AlarmID 1001 → "Motor 1 — Temperatura alta"
-AlarmID 1002 → "Motor 1 — Sobrecarga"
-AlarmID 2001 → "Sensor 1 — Presión alta"
+AlarmID 1001 → "Motor 1 — High temperature"
+AlarmID 1002 → "Motor 1 — Overload"
+AlarmID 2001 → "Sensor 1 — High pressure"
 ```
 
-O alternativamente usa `(Category, Device, Severity)` para componer el texto dinámicamente.
+Or alternatively, use `(Category, Device, Severity)` to compose the text dynamically.
 
-### Ejemplo 4: Agregar una alarma nueva al sistema
+### Example 4: Adding a new alarm to the system
 
-1. Agregar la señal de proceso al DB de proceso.
-2. Agregar una línea en `FC_AlarmManager`:
+1. Add the process signal to the process DB.
+2. Add a line in `FC_AlarmManager`:
 
 ```scl
-"FB_AlarmHandler".NombreNuevaAlarma(
-    IsActive       := "DB_PROCESS".NuevaSenal,
-    AlarmID        := DInt#3001,       // ID único, no repetir
+"FB_AlarmHandler".NewAlarmName(
+    IsActive       := "DB_PROCESS".NewSignal,
+    AlarmID        := DInt#3001,       // Unique ID, don't reuse
     Category       := USInt#3,         // Safety
     Severity       := USInt#3,         // Critical
     Device         := USInt#5,
-    CmdAck         := "DB_CMDS".AckNueva,
+    CmdAck         := "DB_CMDS".AckNew,
     EnableHistory  := EnableHistory,
-    State          := "DB_ALARMS".Safety[0],  // índice libre
+    State          := "DB_ALARMS".Safety[0],  // free index
     HistBuf        := "DB_HIST".Buf);
 ```
 
-3. Agregar el texto en la tabla del HMI. Listo.
+3. Add the text to the HMI's lookup table. Done.
 
 ---
 
-## 8. Escalado a proyectos grandes
+## 8. Scaling to large projects
 
-| Escala | Configuración recomendada |
+| Scale | Recommended configuration |
 |--------|--------------------------|
-| ~50 alarmas (máquina simple) | 4 categorías × 15 entradas, historial 50 entradas, `EnableHistory := FALSE` si no hay HMI |
-| ~200 alarmas (línea de producción) | 6–8 categorías, historial 200–500 entradas, OPC-UA activo |
-| 500+ alarmas (planta) | Considerar múltiples `FC_AlarmManager` por zona/área, un `DB_HIST` por área o uno global centralizado |
-| 1000+ alarmas | Dividir en FCs por zona. El FB no cambia. Solo agregar instancias y categorías en `DB_ALARMS` |
+| ~50 alarms (simple machine) | 4 categories × 15 entries, 50-entry history, `EnableHistory := FALSE` if there's no HMI |
+| ~200 alarms (production line) | 6–8 categories, 200–500-entry history, OPC-UA active |
+| 500+ alarms (plant) | Consider multiple `FC_AlarmManager` per zone/area, one `DB_HIST` per area or one centralized global |
+| 1000+ alarms | Split into FCs by zone. The FB doesn't change. Just add instances and categories in `DB_ALARMS` |
 
-**Memoria estimada por alarma:**
-- `UDT_AlarmState`: ~50 bytes por entrada
-- `UDT_AlarmHistEntry`: ~40 bytes por entrada
-- 500 alarmas activas + 1000 entradas historial ≈ **65 KB** — dentro de cualquier S7-1500.
+**Estimated memory per alarm:**
+- `UDT_AlarmState`: ~50 bytes per entry
+- `UDT_AlarmHistEntry`: ~40 bytes per entry
+- 500 active alarms + 1000 history entries ≈ **65 KB** — well within any S7-1500.
 
 ---
 
-## 9. Notas y limitaciones
+## 9. Notes and limitations
 
-### Limitación: `_HistIdx` en activaciones rápidas
-Si una alarma se activa/desactiva varias veces antes de que el HMI lea el historial,
-`_HistIdx` apunta siempre a la **última** entrada escrita. Las entradas anteriores de esa
-alarma quedan con `TimeCleared = 1970` hasta que sean sobreescritas por el ring buffer.
-Para sistemas con alarmas de muy alta frecuencia, considerar no actualizar `TimeCleared`
-en el historial y manejarlo solo en `State.TimeCleared`.
+### Limitation: `_HistIdx` on rapid activations
+If an alarm activates/deactivates several times before the HMI reads the history,
+`_HistIdx` always points to the **last** entry written. Earlier entries for that
+alarm are left with `TimeCleared = 1970` until the ring buffer overwrites them.
+For systems with very high-frequency alarms, consider not updating `TimeCleared`
+in the history and handling it only in `State.TimeCleared`.
 
-### Limitación: FC sin VAR estáticas
-Los flancos de `CmdAckAll` y `CmdClear` en el FC usan bits de memoria (`%M`).
-Si esto no es aceptable por estándares del proyecto, convertir `FC_AlarmManager` a `FB_AlarmManager`.
+### Limitation: FC has no static VARs
+The edge detection for `CmdAckAll` and `CmdClear` in the FC uses memory bits (`%M`).
+If that's not acceptable under project standards, convert `FC_AlarmManager` to `FB_AlarmManager`.
 
-### OPC-UA en S7-1214 FW4+
-- Activar servidor OPC-UA en: CPU properties > OPC UA > Server > Activate
-- Exponer `DB_HIST` y `DB_ALARMS` en la configuración del servidor OPC-UA
-- Máximo de nodos publicables varía por modelo de CPU — verificar en Manual de la CPU
+### OPC-UA on S7-1214 FW4+
+- Enable the OPC-UA server at: CPU properties > OPC UA > Server > Activate
+- Expose `DB_HIST` and `DB_ALARMS` in the OPC-UA server configuration
+- Maximum publishable nodes varies by CPU model — check the CPU manual
 
-### Compatibilidad TIA Portal
-Este código está escrito para **TIA Portal V17+** (sintaxis SCL moderna).
-En V20 es completamente compatible. `RD_SYS_T` requiere librería estándar S7 (incluida por defecto).
+### TIA Portal compatibility
+This code is written for **TIA Portal V17+** (modern SCL syntax).
+It is fully compatible with V20. `RD_SYS_T` requires the standard S7 library (included by default).
